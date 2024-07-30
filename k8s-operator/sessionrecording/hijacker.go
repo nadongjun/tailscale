@@ -39,7 +39,7 @@ const (
 )
 
 // protocol is the streaming protocol of the hijacked session. Supported
-// protocols are SPDY.
+// protocols are SPDY and WebSockets.
 type protocol string
 
 var (
@@ -50,20 +50,33 @@ var (
 	counterSessionRecordingsUploaded = clientmetric.NewCounter("k8s_auth_proxy_session_recordings_uploaded")
 )
 
-func New(ts *tsnet.Server, req *http.Request, who *apitype.WhoIsResponse, w http.ResponseWriter, pod, ns string, proto protocol, addrs []netip.AddrPort, failOpen bool, connFunc RecorderDialFn, log *zap.SugaredLogger) *Hijacker {
+func New(opts HijackerOpts) *Hijacker {
 	return &Hijacker{
-		ts:                ts,
-		req:               req,
-		who:               who,
-		ResponseWriter:    w,
-		pod:               pod,
-		ns:                ns,
-		addrs:             addrs,
-		failOpen:          failOpen,
-		connectToRecorder: connFunc,
-		proto:             proto,
-		log:               log,
+		ts:                opts.TS,
+		req:               opts.Req,
+		who:               opts.Who,
+		ResponseWriter:    opts.W,
+		pod:               opts.Pod,
+		ns:                opts.Namespace,
+		addrs:             opts.Addrs,
+		failOpen:          opts.FailOpen,
+		proto:             opts.Proto,
+		log:               opts.Log,
+		connectToRecorder: sessionrecording.ConnectToRecorder,
 	}
+}
+
+type HijackerOpts struct {
+	TS        *tsnet.Server
+	Req       *http.Request
+	W         http.ResponseWriter
+	Who       *apitype.WhoIsResponse
+	Addrs     []netip.AddrPort
+	Log       *zap.SugaredLogger
+	Pod       string
+	Namespace string
+	FailOpen  bool
+	Proto     protocol
 }
 
 // Hijacker implements [net/http.Hijacker] interface.
@@ -114,7 +127,10 @@ func (h *Hijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func (h *Hijacker) setUpRecording(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	const (
 		// https://docs.asciinema.org/manual/asciicast/v2/
-		asciicastv2 = 2
+		asciicastv2  = 2
+		hasTTYKey    = "tty"
+		commandKey   = "command"
+		containerKey = "container"
 	)
 	var wc io.WriteCloser
 	h.log.Infof("kubectl exec session will be recorded, recorders: %v, fail open policy: %t", h.addrs, h.failOpen)
@@ -140,16 +156,18 @@ func (h *Hijacker) setUpRecording(ctx context.Context, conn net.Conn) (net.Conn,
 	cl := tstime.DefaultClock{}
 	rec := tsrecorder.New(wc, cl, cl.Now(), h.failOpen)
 	qp := h.req.URL.Query()
+	tty := strings.Join(qp[hasTTYKey], "")
+	hasTerm := (tty == "true") // session has terminal attached
 	ch := sessionrecording.CastHeader{
 		Version:   asciicastv2,
 		Timestamp: cl.Now().Unix(),
-		Command:   strings.Join(qp["command"], " "),
+		Command:   strings.Join(qp[commandKey], " "),
 		SrcNode:   strings.TrimSuffix(h.who.Node.Name, "."),
 		SrcNodeID: h.who.Node.StableID,
 		Kubernetes: &sessionrecording.Kubernetes{
 			PodName:   h.pod,
 			Namespace: h.ns,
-			Container: strings.Join(qp["container"], " "),
+			Container: strings.Join(qp[containerKey], " "),
 		},
 	}
 	if !h.who.Node.IsTagged() {
@@ -162,9 +180,9 @@ func (h *Hijacker) setUpRecording(ctx context.Context, conn net.Conn) (net.Conn,
 	var lc srconn.Conn
 	switch h.proto {
 	case SPDYProtocol:
-		lc = spdy.New(conn, rec, ch, h.log)
+		lc = spdy.New(conn, rec, ch, hasTerm, h.log)
 	case WSProtocol:
-		lc = ws.New(conn, rec, ch, h.log)
+		lc = ws.New(conn, rec, ch, hasTerm, h.log)
 	default:
 		return nil, fmt.Errorf("unknown protocol: %s", h.proto)
 	}

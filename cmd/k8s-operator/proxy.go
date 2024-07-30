@@ -24,7 +24,6 @@ import (
 	"tailscale.com/client/tailscale/apitype"
 	kubesessionrecording "tailscale.com/k8s-operator/sessionrecording"
 	tskube "tailscale.com/kube"
-	"tailscale.com/sessionrecording"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/clientmetric"
@@ -32,11 +31,17 @@ import (
 	"tailscale.com/util/set"
 )
 
-var whoIsKey = ctxkey.New("", (*apitype.WhoIsResponse)(nil))
+const (
+	// 'kubectl exec' session parameters to be extracted from request URL
+	// parameters.
+	podNameKey       = "pod"
+	namespaceNameKey = "namespace"
+)
 
 var (
 	// counterNumRequestsproxies counts the number of API server requests proxied via this proxy.
 	counterNumRequestsProxied = clientmetric.NewCounter("k8s_auth_proxy_requests_proxied")
+	whoIsKey                  = ctxkey.New("", (*apitype.WhoIsResponse)(nil))
 )
 
 type apiServerProxyMode int
@@ -248,7 +253,20 @@ func (ap *apiserverProxy) serveExecSPDY(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, msg, http.StatusForbidden)
 		return
 	}
-	spdyH := kubesessionrecording.New(ap.ts, r, who, w, r.PathValue("pod"), r.PathValue("namespace"), kubesessionrecording.SPDYProtocol, addrs, failOpen, sessionrecording.ConnectToRecorder, ap.log)
+
+	opts := kubesessionrecording.HijackerOpts{
+		Req:       r,
+		W:         w,
+		Proto:     kubesessionrecording.SPDYProtocol,
+		TS:        ap.ts,
+		Who:       who,
+		Addrs:     addrs,
+		FailOpen:  failOpen,
+		Pod:       r.PathValue(podNameKey),
+		Namespace: r.PathValue(namespaceNameKey),
+		Log:       ap.log,
+	}
+	spdyH := kubesessionrecording.New(opts)
 
 	ap.rp.ServeHTTP(spdyH, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
 }
@@ -291,9 +309,20 @@ func (ap *apiserverProxy) serveExecWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, http.StatusForbidden)
 		return
 	}
-	spdyH := kubesessionrecording.New(ap.ts, r, who, w, r.PathValue("pod"), r.PathValue("namespace"), kubesessionrecording.WSProtocol, addrs, failOpen, sessionrecording.ConnectToRecorder, ap.log)
-
-	ap.rp.ServeHTTP(spdyH, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
+	opts := kubesessionrecording.HijackerOpts{
+		Req:       r,
+		W:         w,
+		Proto:     kubesessionrecording.WSProtocol,
+		TS:        ap.ts,
+		Who:       who,
+		Addrs:     addrs,
+		FailOpen:  failOpen,
+		Pod:       r.PathValue(podNameKey),
+		Namespace: r.PathValue(namespaceNameKey),
+		Log:       ap.log,
+	}
+	wsH := kubesessionrecording.New(opts)
+	ap.rp.ServeHTTP(wsH, r.WithContext(whoIsKey.WithValue(r.Context(), who)))
 }
 
 func (h *apiserverProxy) addImpersonationHeadersAsRequired(r *http.Request) {
@@ -328,9 +357,11 @@ func (h *apiserverProxy) addImpersonationHeadersAsRequired(r *http.Request) {
 		log.Printf("failed to add impersonation headers: " + err.Error())
 	}
 }
+
 func (ap *apiserverProxy) whoIs(r *http.Request) (*apitype.WhoIsResponse, error) {
 	return ap.lc.WhoIs(r.Context(), r.RemoteAddr)
 }
+
 func (ap *apiserverProxy) authError(w http.ResponseWriter, err error) {
 	ap.log.Errorf("failed to authenticate caller: %v", err)
 	http.Error(w, "failed to authenticate caller", http.StatusInternalServerError)
