@@ -95,4 +95,7 @@ const (
 	// Keys with a string array value.
 	// AllowedSuggestedExitNodes's string array value is a list of exit node IDs that restricts which exit nodes are considered when generating suggestions for exit nodes.
 	AllowedSuggestedExitNodes Key = "AllowedSuggestedExitNodes"
+
+	// TODO: document this key
+	AuthKey Key = "AuthKey"
 )

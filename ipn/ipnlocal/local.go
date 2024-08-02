@@ -1857,15 +1857,23 @@ func (b *LocalBackend) Start(opts ipn.Options) error {
 		}
 	}
 	if b.state != ipn.Running && b.conf != nil && b.conf.Parsed.AuthKey != nil && opts.AuthKey == "" {
-		v := *b.conf.Parsed.AuthKey
-		if filename, ok := strings.CutPrefix(v, "file:"); ok {
-			b, err := os.ReadFile(filename)
-			if err != nil {
-				return fmt.Errorf("error reading config file authKey: %w", err)
+		// First, try to use an auth key provided via MDM / system policies.
+		ak, _ := syspolicy.GetString(syspolicy.AuthKey, "")
+		if ak != "" {
+			b.logf("Start: using syspolicy authkey")
+			opts.AuthKey = strings.TrimSpace(ak)
+		} else {
+			// If that fails, try to use the auth key from the config or a file.
+			v := *b.conf.Parsed.AuthKey
+			if filename, ok := strings.CutPrefix(v, "file:"); ok {
+				b, err := os.ReadFile(filename)
+				if err != nil {
+					return fmt.Errorf("error reading config file authKey: %w", err)
+				}
+				v = strings.TrimSpace(string(b))
 			}
-			v = strings.TrimSpace(string(b))
+			opts.AuthKey = v
 		}
-		opts.AuthKey = v
 	}
 
 	hostinfo := hostinfo.New()
